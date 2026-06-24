@@ -1,0 +1,26 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5c1544f99e73f694885b7ff7bc4e3f68, type: 3}
+  m_Name: Skirmishers
+  m_EditorClassIdentifier: 
+  unitName: Skirmisher
+  unitType: 1
+  soldierCount: 12
+  soldierCircleSize: 0.15
+  movementRange: 4
+  fireRange: 4
+  fireDamage: 8
+  chargeDamage: 5
+  startingMorale: 100
+  witnessEffectRadius: 1
+  canFormSquare: 0
+  canSkirmish: 1
