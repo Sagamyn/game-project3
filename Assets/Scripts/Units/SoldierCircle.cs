@@ -12,22 +12,34 @@ public class SoldierCircle : MonoBehaviour
     public Color deadColor    = new Color(0.15f, 0.15f, 0.15f);
 
     [Header("Movement")]
-    public float marchSpeed    = 2.0f;
-    public float formUpSpeed   = 3.5f; // slightly faster for form-up
+    public float marchSpeed  = 2.0f;
+    public float formUpSpeed = 3.5f;
 
-    // Movement state machine
-    private enum MovePhase { Idle, Marching, FormingUp }
+    // Replace knockback fields with these
+    private Vector3 knockbackVelocity;
+    private float   knockbackDecay        = 8f;
+    private Vector3 knockbackReturnWorld; // world space return point
+    private bool    isKnockedBack         = false;
+
+    private enum MovePhase { Idle, Marching, FormingUp, Fleeing, KnockedBack, Melee }
     private MovePhase movePhase = MovePhase.Idle;
 
-    // Phase 1 — march to hex center in world space
-    private Vector3 worldMarchTarget;
+    private Vector3    worldMarchTarget;
+    private Vector3    localFormTarget;
+    public Transform  formationParent;
 
-    // Phase 2 — drift into formation in local space
-    private Vector3 localFormTarget;
-    private Transform formationParent;
+    private float meleeTimer      = 0f;
+    private float meleeMoveCooldown = 0f;
+    private Vector3 meleeTargetPos;
+    private float meleeMoveInterval = 0.3f;
+
+    private Vector3 fleeDirection;
+    private float   fleeSpeed;
+    private float   fleeDistance;
+    private float   distanceFled;
 
     private SpriteRenderer sr;
-    private Faction faction;
+    private Faction        faction;
 
     public System.Action OnArrived;
 
@@ -42,19 +54,18 @@ public class SoldierCircle : MonoBehaviour
     {
         switch (movePhase)
         {
-            case MovePhase.Marching:
-                UpdateMarching();
-                break;
-
-            case MovePhase.FormingUp:
-                UpdateFormingUp();
-                break;
+            case MovePhase.Marching:  UpdateMarching();  break;
+            case MovePhase.FormingUp: UpdateFormingUp(); break;
+            case MovePhase.Fleeing:   UpdateFleeing();   break;
+            case MovePhase.KnockedBack: UpdateKnockedBack(); break;
+            case MovePhase.Melee:       UpdateMelee();       break;
         }
     }
 
+    // ── Marching ──────────────────────────────────────────────────
+
     void UpdateMarching()
     {
-        // Move toward hex center in world space
         transform.position = Vector3.MoveTowards(
             transform.position,
             worldMarchTarget,
@@ -63,7 +74,6 @@ public class SoldierCircle : MonoBehaviour
 
         if (Vector3.Distance(transform.position, worldMarchTarget) < 0.01f)
         {
-            // Arrived at hex center — now form up
             transform.position = worldMarchTarget;
             StartFormingUp();
         }
@@ -71,23 +81,35 @@ public class SoldierCircle : MonoBehaviour
 
     void StartFormingUp()
     {
-        // Re-parent to unit container
-        transform.SetParent(formationParent);
+        if (formationParent != null)
+                transform.SetParent(formationParent, true);
 
-        // Begin phase 2 — drift to formation offset
-        movePhase = MovePhase.FormingUp;
+            movePhase = MovePhase.FormingUp;
     }
 
     void UpdateFormingUp()
     {
-        // Smoothly move to formation position in local space
+        // If we have no parent yet just idle
+        if (transform.parent == null)
+        {
+            // Try to re-parent
+            if (formationParent != null)
+                transform.SetParent(formationParent, true);
+            else
+            {
+                movePhase = MovePhase.Idle;
+                return;
+            }
+        }
+
         transform.localPosition = Vector3.MoveTowards(
             transform.localPosition,
             localFormTarget,
             formUpSpeed * Time.deltaTime
         );
 
-        if (Vector3.Distance(transform.localPosition, localFormTarget) < 0.005f)
+        if (Vector3.Distance(
+            transform.localPosition, localFormTarget) < 0.005f)
         {
             transform.localPosition = localFormTarget;
             movePhase = MovePhase.Idle;
@@ -95,29 +117,130 @@ public class SoldierCircle : MonoBehaviour
         }
     }
 
-    // Called to start the full two-phase march
-    public void MarchTo(
-        Vector3 hexCenterWorld,   // world pos of destination hex
-        Vector3 localFormation,   // local offset in formation
-        Transform parent,         // unit container to re-parent to
-        float customMarchSpeed = -1f,
-        float customFormSpeed  = -1f)
+    // ── Melee ────────────────────────────────────────────────────
+
+    void UpdateMelee()
+    {
+        // Stop immediately if soldier died during melee
+        if (state == SoldierState.Dead)
+        {
+            movePhase = MovePhase.Idle;
+            return;
+        }
+
+        meleeMoveCooldown -= Time.deltaTime;
+
+        if (meleeMoveCooldown <= 0f)
+        {
+            meleeTargetPos = transform.position + new Vector3(
+                UnityEngine.Random.Range(-0.2f, 0.2f),
+                UnityEngine.Random.Range(-0.2f, 0.2f),
+                0
+            );
+
+            meleeMoveCooldown = meleeMoveInterval +
+                UnityEngine.Random.Range(-0.1f, 0.1f);
+        }
+
+        transform.position = Vector3.MoveTowards(
+            transform.position,
+            meleeTargetPos,
+            1.5f * Time.deltaTime
+        );
+    }
+
+    public void EnterMelee()
     {
         if (state == SoldierState.Dead) return;
 
-        worldMarchTarget  = hexCenterWorld;
-        localFormTarget   = localFormation;
-        formationParent   = parent;
+        // Only detach if still parented
+        // (knockback already detached them)
+        if (transform.parent != null)
+            transform.SetParent(null, true);
+
+        meleeTargetPos    = transform.position;
+        meleeMoveCooldown = UnityEngine.Random.Range(0f, 0.5f);
+        movePhase         = MovePhase.Melee;
+    }
+
+    public void ExitMelee(Transform parent, Vector3 localTarget)
+    {
+        // Re-parent and return to formation
+        formationParent = parent;
+        localFormTarget = localTarget;
+        transform.SetParent(parent, true);
+        movePhase = MovePhase.FormingUp;
+    }
+
+    public bool IsInMelee => movePhase == MovePhase.Melee;
+
+    // ── Fleeing ───────────────────────────────────────────────────
+
+    void UpdateFleeing()
+    {
+        transform.position += fleeDirection * fleeSpeed * Time.deltaTime;
+        distanceFled       += fleeSpeed * Time.deltaTime;
+
+        if (distanceFled >= fleeDistance)
+            Destroy(gameObject);
+    }
+
+    // ── Public API ────────────────────────────────────────────────
+
+    public void MarchTo(
+        Vector3   hexCenterWorld,
+        Vector3   localFormation,
+        Transform parent,
+        float     customMarchSpeed = -1f,
+        float     customFormSpeed  = -1f)
+    {
+        if (state == SoldierState.Dead) return;
+
+        // Capture world position before ANY parent change
+        Vector3 currentWorldPos = transform.position;
+
+        worldMarchTarget = hexCenterWorld;
+        localFormTarget  = localFormation;
+        formationParent  = parent;
 
         if (customMarchSpeed > 0) marchSpeed  = customMarchSpeed;
         if (customFormSpeed  > 0) formUpSpeed = customFormSpeed;
 
-        // Detach from parent to march in world space
-        transform.SetParent(null);
+        // Detach preserving world position
+        transform.SetParent(null, true);
+
+        // Force position — belt and suspenders
+        transform.position = currentWorldPos;
+
         movePhase = MovePhase.Marching;
     }
 
-    // Instant placement — used on spawn only
+    public void FleeOffMap(Vector3 direction, float speed)
+    {
+        if (state == SoldierState.Dead) return;
+
+        // Capture world position before detaching
+        Vector3 currentWorldPos = transform.position;
+
+        // Detach preserving world position
+        transform.SetParent(null, true);
+
+        // Force exact position after detach
+        transform.position = currentWorldPos;
+
+        float wobble  = UnityEngine.Random.Range(-0.5f, 0.5f);
+        fleeDirection = new Vector3(
+            direction.x + wobble,
+            direction.y + wobble,
+            0
+        ).normalized;
+
+        fleeSpeed    = speed;
+        fleeDistance = UnityEngine.Random.Range(8f, 12f);
+        distanceFled = 0f;
+        movePhase    = MovePhase.Fleeing;
+    }
+
     public void SnapTo(Vector3 localPosition)
     {
         localFormTarget         = localPosition;
@@ -125,7 +248,6 @@ public class SoldierCircle : MonoBehaviour
         movePhase               = MovePhase.Idle;
     }
 
-    // Smooth form-up only — no marching (used for morale shifts)
     public void FormUpTo(Vector3 localPosition)
     {
         localFormTarget = localPosition;
@@ -147,7 +269,65 @@ public class SoldierCircle : MonoBehaviour
             SoldierState.Dead    => deadColor,
             _                    => sr.color
         };
+
+        // Stop all movement when soldier dies
+        if (state == SoldierState.Dead)
+        {
+            movePhase         = MovePhase.Idle;
+            knockbackVelocity = Vector3.zero;
+        }
     }
 
     public bool IsMoving => movePhase != MovePhase.Idle;
+
+    public void StopAllMovement()
+    {
+        movePhase         = MovePhase.Idle;
+        knockbackVelocity = Vector3.zero;
+        meleeMoveCooldown = 0f;
+    }
+
+    void UpdateKnockedBack()
+    {
+        // Move in world space
+        transform.position += knockbackVelocity * Time.deltaTime;
+
+        // Decay velocity
+        knockbackVelocity = Vector3.Lerp(
+            knockbackVelocity,
+            Vector3.zero,
+            knockbackDecay * Time.deltaTime
+        );
+
+        // Once stopped — go IDLE and wait
+        // MeleeManager will call EnterMelee() shortly after
+        if (knockbackVelocity.magnitude < 0.05f)
+        {
+            transform.position = transform.position; // stay put
+            movePhase          = MovePhase.Idle;     // wait for melee
+        }
+    }
+
+    public void ApplyKnockback(Vector3 impactDirection, float force)
+    {
+        if (state == SoldierState.Dead) return;
+
+        // Capture current WORLD position as return point
+        knockbackReturnWorld = transform.position;
+
+        // Random spread on impact direction
+        float spread = UnityEngine.Random.Range(-0.3f, 0.3f);
+        Vector3 knockDir = new Vector3(
+            impactDirection.x + spread,
+            impactDirection.y + spread,
+            0
+        ).normalized;
+
+        // Detach to move freely in world space
+        transform.SetParent(null, true);
+
+        knockbackVelocity = knockDir * force;
+        isKnockedBack     = true;
+        movePhase         = MovePhase.KnockedBack;
+    }
 }

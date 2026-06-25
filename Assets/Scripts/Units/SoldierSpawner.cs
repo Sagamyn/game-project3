@@ -139,19 +139,19 @@ public class SoldierSpawner : MonoBehaviour
             {
                 case UnitType.Cavalry:
                     minDelay = 0f;   maxDelay = 0.08f;
-                    minSpeed = 3.0f; maxSpeed = 4.5f;
+                    minSpeed = 1.0f; maxSpeed = 1.5f;
                     break;
                 case UnitType.Skirmisher:
                     minDelay = 0f;   maxDelay = 0.4f;
-                    minSpeed = 2.0f; maxSpeed = 3.5f;
+                    minSpeed = 0.6f; maxSpeed = 1f;
                     break;
                 case UnitType.Artillery:
                     minDelay = 0f;   maxDelay = 0.2f;
-                    minSpeed = 0.8f; maxSpeed = 1.2f;
+                    minSpeed = 0.1f; maxSpeed = 0.3f;
                     break;
                 default: // LineInfantry
                     minDelay = 0f;   maxDelay = 0.15f;
-                    minSpeed = 1.5f; maxSpeed = 2.0f;
+                    minSpeed = 0.3f; maxSpeed = 0.6f;
                     break;
             }
 
@@ -179,21 +179,139 @@ public class SoldierSpawner : MonoBehaviour
             onAllArrived?.Invoke();
     }
 
+    // Called on cavalry unit before impact
+// Soldiers march toward enemy formation
+    public void MarchIntoEnemy(
+        UnitController enemyUnit,
+        System.Action onArrived)
+    {
+        List<Vector2> enemyPositions = new List<Vector2>();
+
+        // Get enemy soldier world positions
+        List<Vector3> targets = new List<Vector3>();
+        foreach (SoldierCircle sc in enemyUnit.soldiers)
+        {
+            if (sc == null) continue;
+            if (sc.state == SoldierState.Dead) continue;
+            targets.Add(sc.transform.position);
+        }
+
+        if (targets.Count == 0)
+        {
+            onArrived?.Invoke();
+            return;
+        }
+
+        int arrivedCount  = 0;
+        int activeSoldiers = 0;
+
+        Transform container = unit.soldierContainer != null
+            ? unit.soldierContainer.transform
+            : transform;
+
+        for (int i = 0; i < spawnedSoldiers.Count; i++)
+        {
+            SoldierCircle sc = spawnedSoldiers[i];
+            if (sc == null) continue;
+            if (sc.state == SoldierState.Dead) continue;
+
+            activeSoldiers++;
+
+            // Each cavalry soldier targets nearest enemy soldier
+            // or wraps around if more cavalry than enemy soldiers
+            int targetIndex = i % targets.Count;
+            Vector3 worldDest = targets[targetIndex];
+
+            // Add slight offset so they don't all stack on same point
+            worldDest += new Vector3(
+                UnityEngine.Random.Range(-0.1f, 0.1f),
+                UnityEngine.Random.Range(-0.1f, 0.1f),
+                0
+            );
+
+            // Capture current world position
+            Vector3 startPos = sc.transform.position;
+
+            // Fast charge speed — cavalry is galloping
+            float chargeSpeed = UnityEngine.Random.Range(1f, 2f);
+
+            StartCoroutine(ChargeIntoEnemy(
+                sc,
+                startPos,
+                worldDest,
+                container,
+                chargeSpeed,
+                () =>
+                {
+                    arrivedCount++;
+                    if (arrivedCount >= activeSoldiers)
+                        onArrived?.Invoke();
+                }
+            ));
+        }
+
+        if (activeSoldiers == 0)
+            onArrived?.Invoke();
+    }
+
+    System.Collections.IEnumerator ChargeIntoEnemy(
+        SoldierCircle soldier,
+        Vector3 startPos,
+        Vector3 worldDest,
+        Transform container,
+        float speed,
+        System.Action onArrived)
+    {
+        if (soldier == null) yield break;
+
+        // Detach soldier to move freely in world space
+        soldier.transform.SetParent(null, true);
+        soldier.transform.position = startPos;
+
+        // Use a simple world space march directly
+        // bypass normal MarchTo so we control it here
+        float dist = Vector3.Distance(startPos, worldDest);
+        float duration = dist / speed;
+        float elapsed  = 0f;
+
+        while (elapsed < duration)
+        {
+            if (soldier == null) yield break;
+
+            elapsed += Time.deltaTime;
+            float t  = Mathf.Clamp01(elapsed / duration);
+
+            // Ease in — soldiers accelerate into charge
+            float easedT = t * t;
+
+            soldier.transform.position = Vector3.Lerp(
+                startPos,
+                worldDest,
+                easedT
+            );
+
+            yield return null;
+        }
+
+        if (soldier != null)
+            soldier.transform.position = worldDest;
+
+        onArrived?.Invoke();
+    }
     IEnumerator StaggeredMarch(
     SoldierCircle soldier,
-    Vector3 worldStart,
-    Vector3 worldDest,
-    Vector3 localDest,
-    Transform container,
-    float delay,
-    float speed,
+    Vector3       worldStart,
+    Vector3       worldDest,
+    Vector3       localDest,
+    Transform     container,
+    float         delay,
+    float         speed,
     System.Action onArrived)
     {
-        // Detach immediately so world position is preserved
-        soldier.transform.SetParent(null);
+        // Detach immediately preserving world position
+        soldier.transform.SetParent(null, true);
 
-        // Force to captured start position RIGHT NOW
-        // before any delay
+        // Force to captured start position
         soldier.transform.position = worldStart;
 
         if (delay > 0)
@@ -237,6 +355,15 @@ public class SoldierSpawner : MonoBehaviour
         }
     }
 
+    public List<Vector2> GetCurrentFormationPositions()
+    {
+        return GetFormationPositions(
+            unit.data.unitType,
+            unit.data.soldierCount,
+            unit.currentFormation
+        );
+    }
+
     IEnumerator StaggeredLocalMove(
         SoldierCircle soldier,
         Vector3 localDest,
@@ -267,6 +394,69 @@ public class SoldierSpawner : MonoBehaviour
         return positions;
     }
 
+    // Called when this unit is charged
+    // impactDirection = direction cavalry came FROM
+    public void ApplyChargeImpact(Vector3 impactDirection)
+    {
+        for (int i = 0; i < spawnedSoldiers.Count; i++)
+        {
+            SoldierCircle sc = spawnedSoldiers[i];
+            if (sc == null) continue;
+            if (sc.state == SoldierState.Dead) continue;
+
+            // Stagger impact slightly — not all hit at same frame
+            float delay = UnityEngine.Random.Range(0f, 0.1f);
+            float force = UnityEngine.Random.Range(0.8f, 2.0f);
+
+            // Soldiers closer to impact direction hit harder
+            // This creates a realistic impact wave
+            StartCoroutine(DelayedKnockback(sc, impactDirection, force, delay));
+        }
+    }
+
+    // Called on the cavalry unit doing the charging
+    // rushDirection = direction toward target
+    public void AnimateCavalryRush(Vector3 rushDirection)
+    {
+        for (int i = 0; i < spawnedSoldiers.Count; i++)
+        {
+            SoldierCircle sc = spawnedSoldiers[i];
+            if (sc == null) continue;
+            if (sc.state == SoldierState.Dead) continue;
+
+            float delay = UnityEngine.Random.Range(0f, 0.05f);
+            float force = UnityEngine.Random.Range(1.5f, 2.5f);
+
+            StartCoroutine(DelayedKnockback(
+                sc,
+                rushDirection,
+                force,
+                delay
+            ));
+        }
+    }
+
+    System.Collections.IEnumerator DelayedKnockback(
+    SoldierCircle soldier,
+    Vector3 direction,
+    float force,
+    float delay)
+    {
+        if (delay > 0)
+            yield return new WaitForSeconds(delay);
+
+        if (soldier == null) yield break;
+        if (soldier.state == SoldierState.Dead) yield break;
+
+        // Set formation parent before knockback
+        // so soldier knows where to return to
+        Transform container = unit.soldierContainer != null
+            ? unit.soldierContainer.transform
+            : transform;
+
+        soldier.formationParent = container;
+        soldier.ApplyKnockback(direction, force);
+    }
     // ── Helpers ───────────────────────────────────────────────────
 
     float GetMoraleSpread(MoraleState moraleState)
@@ -327,21 +517,41 @@ public class SoldierSpawner : MonoBehaviour
     List<Vector2> GetSquarePositions(int count)
     {
         List<Vector2> pos = new List<Vector2>();
+
+        // Calculate how many per side for a hollow square
         int side = Mathf.CeilToInt(Mathf.Sqrt(count));
 
-        for (int i = 0; i < count; i++)
+        // First fill perimeter
+        for (int row = 0; row < side; row++)
         {
-            int col = i % side;
-            int row = i / side;
-            bool onEdge = col == 0 || col == side - 1
-                       || row == 0 || row == side - 1;
+            for (int col = 0; col < side; col++)
+            {
+                bool onEdge = col == 0 || col == side - 1
+                        || row == 0 || row == side - 1;
 
-            if (onEdge)
+                if (onEdge)
+                {
+                    pos.Add(new Vector2(
+                        (col - side / 2f + 0.5f) * soldierSpacing,
+                        (row - side / 2f + 0.5f) * soldierSpacing
+                    ));
+                }
+            }
+        }
+
+        // If we still need more positions fill interior
+        // This handles leftover soldiers
+        for (int row = 1; row < side - 1 && pos.Count < count; row++)
+        {
+            for (int col = 1; col < side - 1 && pos.Count < count; col++)
+            {
                 pos.Add(new Vector2(
                     (col - side / 2f + 0.5f) * soldierSpacing,
                     (row - side / 2f + 0.5f) * soldierSpacing
                 ));
+            }
         }
+
         return pos;
     }
 

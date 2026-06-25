@@ -16,6 +16,9 @@ public class BattleManager : MonoBehaviour
     [Header("Soldiers")]
     public GameObject soldierPrefab;
 
+    [Header("UI")]
+    public GameObject moraleBarPrefab;
+
     // Tracked units
     public List<UnitController> playerUnits = new List<UnitController>();
     public List<UnitController> enemyUnits  = new List<UnitController>();
@@ -23,6 +26,7 @@ public class BattleManager : MonoBehaviour
     void Start()
     {
         SpawnArmy(Faction.Player);
+
         SpawnArmy(Faction.Enemy);
     }
 
@@ -74,6 +78,7 @@ public class BattleManager : MonoBehaviour
 
             GameObject unitObj = Instantiate(unitPrefab);
             UnitController unit = unitObj.GetComponent<UnitController>();
+            unit.moraleBarPrefab = moraleBarPrefab;
 
             if (unit == null)
             {
