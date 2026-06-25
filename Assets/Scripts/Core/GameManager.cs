@@ -17,6 +17,12 @@ public class GameManager : MonoBehaviour
     public UnitController selectedUnit;
     public List<HexCell> highlightedCells = new List<HexCell>();
 
+    [Header("AI")]
+    public ThreatAssessment threatAssessment;
+
+    [Header("UI")]
+    public FormationUI formationUI;
+
     void Awake()
     {
         // Singleton pattern — one GameManager exists at all times
@@ -28,6 +34,15 @@ public class GameManager : MonoBehaviour
     {
         StartPlanningPhase();
     }
+
+    // Change private to public
+public void KillSoldiersPublic(
+    UnitController target,
+    int count,
+    UnitController attacker)
+{
+    KillSoldiers(target, count, attacker);
+}
 
     // ── Phase Control ─────────────────────────────────────────────
 
@@ -42,25 +57,30 @@ public class GameManager : MonoBehaviour
     public void ExecuteOrders()
     {
         if (currentPhase != TurnPhase.Planning) return;
+        if (ArmyMoraleManager.Instance != null &&
+            ArmyMoraleManager.Instance.IsGameEnded()) return;
 
         currentPhase = TurnPhase.Execution;
         ClearHighlights();
         DeselectUnit();
 
-        Debug.Log("Executing orders...");
+        Debug.Log($"=== EXECUTING TURN {turnNumber} ===");
 
+        // Resolve existing melees first
+        MeleeManager.Instance?.ResolveMeleeEngagements(this);
+
+        // Then resolve new orders
         ResolveMovement(battleManager.playerUnits);
         ResolveFire(battleManager.playerUnits);
         ResolveCharge(battleManager.playerUnits);
 
         ResolveAITurn();
-        ResolveFire(battleManager.enemyUnits);
-        ResolveCharge(battleManager.enemyUnits);
 
         ClearAllOrders();
+        turnNumber++;
 
-        turnNumber++;           // ← increment first
-        StartPlanningPhase();   // ← then announce new turn
+        ArmyMoraleManager.Instance?.RecalculateArmyMorale();
+        StartPlanningPhase();
     }
     // ── Movement Resolution ───────────────────────────────────────────
 
@@ -103,37 +123,43 @@ public class GameManager : MonoBehaviour
 
         UnitController target = unit.orderTargetUnit;
 
-        // Check target still exists and is in range
-        if (target.isDefeated)
+        // Guard — target may have routed this turn
+        if (target.isDefeated || target.isRouting)
         {
-            Debug.Log($"{unit.data.unitName} fire cancelled — target defeated");
+            Debug.Log($"{unit.data.unitName} fire cancelled " +
+                      $"— target already routing");
+            unit.ClearOrder();
+            continue;
+        }
+
+        if (target.currentCell == null)
+        {
+            Debug.Log($"{unit.data.unitName} fire cancelled " +
+                      $"— target cell null");
             unit.ClearOrder();
             continue;
         }
 
         if (!unit.CanFireAt(target))
         {
-            Debug.Log($"{unit.data.unitName} fire cancelled — target out of range");
+            Debug.Log($"{unit.data.unitName} fire cancelled — out of range");
             unit.ClearOrder();
             continue;
         }
 
-        // Calculate morale damage
         int damage = CalculateFireDamage(unit, target);
 
         Debug.Log($"{unit.data.unitName} fires at {target.data.unitName} " +
                   $"— {damage} morale damage");
 
-        // Apply damage
         target.TakeMoraleDamage(damage, unit);
 
-        // Kill some soldiers visually based on damage
         int soldiersKilled = Mathf.RoundToInt(damage / 10f);
         KillSoldiers(target, soldiersKilled, unit);
     }
 }
 
-    void ResolveCharge(List<UnitController> units)
+   void ResolveCharge(List<UnitController> units)
     {
         foreach (UnitController unit in units)
         {
@@ -143,40 +169,112 @@ public class GameManager : MonoBehaviour
 
             UnitController target = unit.orderTargetUnit;
 
-            if (target.isDefeated)
+            if (target.isDefeated || target.isRouting)
             {
-                Debug.Log($"{unit.data.unitName} charge cancelled — target defeated");
+                unit.ClearOrder();
+                continue;
+            }
+
+            if (target.currentCell == null || unit.currentCell == null)
+            {
                 unit.ClearOrder();
                 continue;
             }
 
             int distToTarget = unit.currentCell.DistanceTo(target.currentCell);
-
             if (distToTarget > unit.data.movementRange)
             {
-                Debug.Log($"{unit.data.unitName} charge cancelled — target too far");
+                Debug.Log($"{unit.data.unitName} charge cancelled — too far");
                 unit.ClearOrder();
                 continue;
             }
 
-            // Calculate charge damage
-            int damage = CalculateChargeDamage(unit, target);
+            // Calculate impact direction
+            Vector3 impactDir = (
+                target.transform.position -
+                unit.transform.position
+            ).normalized;
 
-            Debug.Log($"{unit.data.unitName} CHARGES {target.data.unitName} " +
-                    $"— {damage} morale damage!");
-
-            // Apply charge damage
-            target.TakeMoraleDamage(damage, unit);
-
-            // Kill more soldiers than fire (charge is brutal)
-            int soldiersKilled = Mathf.RoundToInt(damage / 8f);
-            KillSoldiers(target, soldiersKilled, unit);
-
-            // Move cavalry to adjacent cell of target
-            HexCell chargeDestination = GetCellAdjacentTo(unit, target);
-            if (chargeDestination != null)
-                unit.MoveToCell(chargeDestination);
+            // Start the full charge sequence
+            // MarchIntoEnemy handles the rush animation now
+            StartCoroutine(DelayedChargeImpact(unit, target, impactDir));
         }
+    }
+
+    System.Collections.IEnumerator DelayedChargeImpact(
+    UnitController attacker,
+    UnitController target,
+    Vector3 impactDir)
+    {
+        if (attacker == null || target == null) yield break;
+        if (target.isDefeated || target.isRouting) yield break;
+
+        SoldierSpawner attackerSpawner =
+            attacker.GetComponent<SoldierSpawner>();
+        SoldierSpawner targetSpawner =
+            target.GetComponent<SoldierSpawner>();
+
+        // ── PHASE 1: Cavalry Gallops Toward Enemy ─────────────────
+        Debug.Log("CHARGE: Cavalry galloping toward enemy...");
+
+        bool cavalryArrived = false;
+
+        attackerSpawner?.MarchIntoEnemy(target, () =>
+        {
+            cavalryArrived = true;
+        });
+
+        // Wait until cavalry soldiers reach enemy
+        float timeout = 0f;
+        while (!cavalryArrived && timeout < 3f)
+        {
+            timeout += Time.deltaTime;
+            yield return null;
+        }
+
+        if (attacker == null || target == null) yield break;
+        if (target.isDefeated || target.isRouting) yield break;
+
+        // ── PHASE 2: COLLISION ────────────────────────────────────
+        Debug.Log("CHARGE: COLLISION!");
+
+        // Apply charge damage
+        int damage = CalculateChargeDamage(attacker, target);
+        Debug.Log($"{attacker.data.unitName} COLLIDES with " +
+                $"{target.data.unitName} — {damage} morale damage!");
+
+        target.TakeMoraleDamage(damage, attacker);
+
+        int soldiersKilled = Mathf.RoundToInt(damage / 8f);
+        KillSoldiers(target, soldiersKilled, attacker);
+
+        // ── PHASE 3: Knockback ────────────────────────────────────
+        // Enemy soldiers fly outward from impact
+        targetSpawner?.ApplyChargeImpact(impactDir);
+
+        // Cavalry soldiers also bounce back slightly
+        // (collision affects both sides)
+        attackerSpawner?.ApplyChargeImpact(-impactDir * 0.4f);
+
+        // Move cavalry unit root to adjacent cell
+        if (target.currentCell != null)
+        {
+            HexCell dest = GetCellAdjacentTo(attacker, target);
+            if (dest != null)
+                attacker.MoveToCell(dest);
+        }
+
+        // ── PHASE 4: Settle ───────────────────────────────────────
+        // Let knockback animation play out
+        yield return new WaitForSeconds(0.6f);
+
+        if (attacker == null || target == null) yield break;
+        if (attacker.isRouting || target.isRouting) yield break;
+        if (attacker.isDefeated || target.isDefeated) yield break;
+
+        // ── PHASE 5: Melee Begins ─────────────────────────────────
+        Debug.Log("CHARGE: Melee begins!");
+        MeleeManager.Instance?.StartMelee(attacker, target);
     }
 
     int CalculateChargeDamage(UnitController attacker, UnitController target)
@@ -215,19 +313,22 @@ public class GameManager : MonoBehaviour
 
     HexCell GetCellAdjacentTo(UnitController mover, UnitController target)
     {
-        // Find an empty cell next to the target to move into
+        // Guard against null cells
+        if (mover == null || target == null) return null;
+        if (mover.currentCell == null || target.currentCell == null) return null;
+
         List<HexCell> adjacentCells = hexGrid.GetCellsInRange(
             target.currentCell, 1
         );
 
-        HexCell bestCell = null;
-        int bestDist = int.MaxValue;
+        HexCell bestCell  = null;
+        int     bestDist  = int.MaxValue;
 
         foreach (HexCell cell in adjacentCells)
         {
+            if (cell == null) continue;
             if (cell.isOccupied) continue;
 
-            // Pick the cell closest to where the charger started
             int dist = cell.DistanceTo(mover.currentCell);
             if (dist < bestDist)
             {
@@ -284,26 +385,46 @@ public class GameManager : MonoBehaviour
 // ── Soldier Casualties ────────────────────────────────────────────
 
     void KillSoldiers(UnitController target, int count, UnitController attacker)
-{
-    int killed = 0;
-
-    foreach (SoldierCircle soldier in target.soldiers)
     {
-        if (killed >= count) break;
-        if (soldier.state != SoldierState.Alive) continue;
+        List<SoldierCircle> living = new List<SoldierCircle>();
+        foreach (SoldierCircle sc in target.soldiers)
+        {
+            if (sc != null && sc.state == SoldierState.Alive)
+                living.Add(sc);
+        }
 
-        // First wound the soldier, then kill on next hit
-        // For now: instantly kill for visual feedback
-        soldier.SetState(SoldierState.Dead);
-        killed++;
-        target.aliveSoldierCount--;
+        // Shuffle for random deaths
+        for (int i = living.Count - 1; i > 0; i--)
+        {
+            int j = UnityEngine.Random.Range(0, i + 1);
+            (living[i], living[j]) = (living[j], living[i]);
+        }
+
+        int killed = 0;
+        foreach (SoldierCircle soldier in living)
+        {
+            if (killed >= count) break;
+
+            // Capture world position
+            Vector3 worldPos = soldier.transform.position;
+
+            // Detach preserving world position
+            soldier.transform.SetParent(null, true);
+            soldier.transform.position = worldPos;
+
+            // Set dead state — this now stops all movement
+            soldier.SetState(SoldierState.Dead);
+
+            // Force stop any remaining velocity
+            soldier.StopAllMovement();
+
+            killed++;
+            target.aliveSoldierCount--;
+        }
+
+        Debug.Log($"{killed} soldiers killed in {target.data.unitName}");
+        TriggerWitnessEffect(target, killed);
     }
-
-    Debug.Log($"{killed} soldiers killed in {target.data.unitName}");
-
-    // Trigger witness effect on nearby soldiers
-    TriggerWitnessEffect(target, killed);
-}
 
 // ── Witness Effect ────────────────────────────────────────────────
 
@@ -322,71 +443,78 @@ public class GameManager : MonoBehaviour
 
 // ── AI Turn ───────────────────────────────────────────────────────
 
-    void ResolveAITurn()
+void ResolveAITurn()
 {
-    Debug.Log("--- AI Turn ---");
+    if (threatAssessment != null)
+    {
+        // Use smart AI
+        threatAssessment.ExecuteAITurn();
 
+        // Resolve movement and fire for AI units
+        ResolveMovement(battleManager.enemyUnits);
+        ResolveFire(battleManager.enemyUnits);
+        ResolveCharge(battleManager.enemyUnits);
+    }
+    else
+    {
+        // Fallback to old simple AI if not wired up
+        Debug.LogWarning("ThreatAssessment not assigned — using simple AI");
+        SimpleAIFallback();
+    }
+}
+
+void SimpleAIFallback()
+{
     foreach (UnitController aiUnit in battleManager.enemyUnits)
     {
-        if (aiUnit.isDefeated || aiUnit.isRouting) continue;
+        if (aiUnit == null || aiUnit.isDefeated || aiUnit.isRouting) continue;
+        if (aiUnit.currentCell == null) continue;
 
-        // Simple AI for now — find nearest player unit and act
-        UnitController nearestPlayer = FindNearestEnemy(
-            aiUnit,
-            battleManager.playerUnits
+        UnitController nearest = FindNearestEnemy(
+            aiUnit, battleManager.playerUnits
         );
 
-        if (nearestPlayer == null) continue;
+        if (nearest == null) continue;
 
-        int distToPlayer = aiUnit.currentCell.DistanceTo(
-            nearestPlayer.currentCell
-        );
+        int dist = aiUnit.currentCell.DistanceTo(nearest.currentCell);
 
-        // Can fire? Fire.
-        if (aiUnit.data.fireRange > 0 && distToPlayer <= aiUnit.data.fireRange)
+        if (aiUnit.data.fireRange > 0 && dist <= aiUnit.data.fireRange)
+            aiUnit.AssignFireOrder(nearest);
+        else if (dist > 1)
         {
-            aiUnit.AssignFireOrder(nearestPlayer);
-            Debug.Log($"AI {aiUnit.data.unitName} fires at " +
-                      $"{nearestPlayer.data.unitName}");
-        }
-        // Can't fire but can move? Advance.
-        else if (distToPlayer > 1)
-        {
-            HexCell advanceCell = GetCellToward(aiUnit, nearestPlayer);
-            if (advanceCell != null)
-            {
-                aiUnit.AssignMoveOrder(advanceCell);
-                Debug.Log($"AI {aiUnit.data.unitName} advances toward " +
-                          $"{nearestPlayer.data.unitName}");
-            }
+            HexCell cell = GetCellToward(aiUnit, nearest);
+            if (cell != null) aiUnit.AssignMoveOrder(cell);
         }
     }
 
-    // Resolve AI movement
     ResolveMovement(battleManager.enemyUnits);
+    ResolveFire(battleManager.enemyUnits);
+    ResolveCharge(battleManager.enemyUnits);
 }
 
     UnitController FindNearestEnemy(
     UnitController unit,
-        List<UnitController> enemies)
-{
-    UnitController nearest = null;
-    int nearestDist = int.MaxValue;
-
-    foreach (UnitController enemy in enemies)
+    List<UnitController> enemies)
     {
-        if (enemy.isDefeated || enemy.isRouting) continue;
+        UnitController nearest     = null;
+        int            nearestDist = int.MaxValue;
 
-        int dist = unit.currentCell.DistanceTo(enemy.currentCell);
-        if (dist < nearestDist)
+        foreach (UnitController enemy in enemies)
         {
-            nearestDist = dist;
-            nearest = enemy;
-        }
-    }
+            // Skip routed, defeated, or null cell units
+            if (enemy.isDefeated || enemy.isRouting) continue;
+            if (enemy.currentCell == null) continue;
 
-    return nearest;
-}
+            int dist = unit.currentCell.DistanceTo(enemy.currentCell);
+            if (dist < nearestDist)
+            {
+                nearestDist = dist;
+                nearest     = enemy;
+            }
+        }
+
+        return nearest;
+    }
 
     HexCell GetCellToward(UnitController mover, UnitController target)
 {
@@ -419,30 +547,62 @@ public class GameManager : MonoBehaviour
 
     void ClearAllOrders()
 {
-    foreach (UnitController unit in battleManager.playerUnits)
-        unit.ClearOrder();
-
-    foreach (UnitController unit in battleManager.enemyUnits)
-        unit.ClearOrder();
+    ClearOrdersForArmy(battleManager.playerUnits);
+    ClearOrdersForArmy(battleManager.enemyUnits);
 }
+
+    void ClearOrdersForArmy(List<UnitController> units)
+    {
+        foreach (UnitController unit in units)
+        {
+            if (unit == null || unit.isDefeated || unit.isRouting) continue;
+
+            // Don't clear orders for units in melee
+            // their "order" is the melee itself
+            if (MeleeManager.Instance != null &&
+                MeleeManager.Instance.IsInMelee(unit))
+                continue;
+
+            if (unit.persistOrder)
+            {
+                if (unit.currentOrder == OrderType.Fire ||
+                    unit.currentOrder == OrderType.Charge)
+                {
+                    if (unit.orderTargetUnit == null ||
+                        unit.orderTargetUnit.isDefeated ||
+                        unit.orderTargetUnit.isRouting)
+                    {
+                        unit.ClearOrder();
+                    }
+                }
+                continue;
+            }
+
+            unit.ClearOrder();
+        }
+    }
 
 
     // ── Selection ─────────────────────────────────────────────────
     public void SelectUnit(UnitController unit)
     {
-        // Can only select player units during planning
         if (currentPhase != TurnPhase.Planning) return;
         if (unit.faction != Faction.Player) return;
         if (unit.isRouting || unit.isDefeated) return;
 
-        // Deselect previous
-        DeselectUnit();
+        // Units in melee can't receive orders
+        if (MeleeManager.Instance != null &&
+            MeleeManager.Instance.IsInMelee(unit))
+        {
+            Debug.Log($"{unit.data.unitName} is in melee — no orders!");
+            return;
+        }
 
+        DeselectUnit();
         selectedUnit = unit;
         unit.SetSelected(true);
-
-        // Show valid movement hexes
         ShowMovementRange(unit);
+        formationUI?.ShowForUnit(unit);
 
         Debug.Log($"Selected: {unit.data.unitName}");
     }
@@ -454,7 +614,11 @@ public class GameManager : MonoBehaviour
             selectedUnit.SetSelected(false);
             selectedUnit = null;
         }
+
         ClearHighlights();
+
+        // Hide formation panel
+        formationUI?.Hide();
     }
 
     // ── Movement Range Display ────────────────────────────────────
@@ -463,7 +627,19 @@ public class GameManager : MonoBehaviour
     {
         ClearHighlights();
 
-        // Show movement range in blue
+        // Don't show movement range if in square formation
+        if (unit.currentFormation == FormationType.Square)
+        {
+            Debug.Log($"{unit.data.unitName} is in Square — cannot move");
+
+            // Still show fire range
+            if (unit.data.fireRange > 0)
+                ShowFireRange(unit);
+
+            return;
+        }
+
+        // Normal movement range
         List<HexCell> inRange = hexGrid.GetCellsInRange(
             unit.currentCell,
             unit.data.movementRange
@@ -477,7 +653,6 @@ public class GameManager : MonoBehaviour
                 highlightedCells.Add(cell);
             }
 
-            // If enemy in movement range AND unit can charge → show as red
             if (cell.isOccupied && cell.occupyingUnit != null &&
                 cell.occupyingUnit.faction != unit.faction &&
                 unit.data.chargeDamage > 0)
@@ -487,22 +662,25 @@ public class GameManager : MonoBehaviour
             }
         }
 
-        // Fire range shown separately for ranged units
+        // Show fire range
         if (unit.data.fireRange > 0)
-        {
-            List<HexCell> fireRange = hexGrid.GetCellsInRange(
-                unit.currentCell,
-                unit.data.fireRange
-            );
+            ShowFireRange(unit);
+    }
 
-            foreach (HexCell cell in fireRange)
+    void ShowFireRange(UnitController unit)
+    {
+        List<HexCell> fireRange = hexGrid.GetCellsInRange(
+            unit.currentCell,
+            unit.data.fireRange
+        );
+
+        foreach (HexCell cell in fireRange)
+        {
+            if (cell.isOccupied && cell.occupyingUnit != null &&
+                cell.occupyingUnit.faction != unit.faction)
             {
-                if (cell.isOccupied && cell.occupyingUnit != null &&
-                    cell.occupyingUnit.faction != unit.faction)
-                {
-                    cell.SetHighlight(HexCell.colorAttack);
-                    highlightedCells.Add(cell);
-                }
+                cell.SetHighlight(HexCell.colorAttack);
+                highlightedCells.Add(cell);
             }
         }
     }
@@ -547,13 +725,21 @@ public class GameManager : MonoBehaviour
 
     void AssignMoveOrder(HexCell targetCell)
     {
-        selectedUnit.AssignMoveOrder(targetCell);
+        // Block movement if in square formation
+        if (selectedUnit.currentFormation == FormationType.Square)
+        {
+            Debug.Log("Cannot move in Square formation!");
 
-        // Show the assigned order visually
+            // Blink the Line Formation button to tell player
+            formationUI?.BlinkLineButton();
+            return;
+        }
+
+        selectedUnit.AssignMoveOrder(targetCell);
         targetCell.SetHighlight(HexCell.colorSelected);
 
         Debug.Log($"{selectedUnit.data.unitName} → Move to " +
-                  $"({targetCell.q},{targetCell.r},{targetCell.s})");
+                $"({targetCell.q},{targetCell.r},{targetCell.s})");
 
         DeselectUnit();
     }

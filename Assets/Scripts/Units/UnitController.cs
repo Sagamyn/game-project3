@@ -15,6 +15,10 @@ public class UnitController : MonoBehaviour
     public HexCell orderTargetCell;
     public UnitController orderTargetUnit;
 
+    [Header("UI")]
+    public GameObject moraleBarPrefab;
+    private MoraleBar moraleBar;
+
     [Header("Morale")]
     public int currentMorale;
     public MoraleState moraleState;
@@ -28,6 +32,9 @@ public class UnitController : MonoBehaviour
     [Header("Visual")]
     public GameObject soldierContainer;
     public SpriteRenderer selectionRing;
+
+    [Header("Orders")]
+    public bool persistOrder = false; // if true, repeat order next turn
 
     // ── Events other systems listen to ──────────────────────────
     public System.Action<UnitController> OnMoraleChanged;
@@ -65,6 +72,16 @@ public class UnitController : MonoBehaviour
         selectionRing.enabled = false;
 
         UpdateMoraleState();
+
+        if (moraleBarPrefab != null)
+        {
+            GameObject barObj = Instantiate(
+                moraleBarPrefab,
+                transform
+            );
+            moraleBar = barObj.GetComponent<MoraleBar>();
+            moraleBar.Initialize(data.startingMorale);
+        }
     }
 
     // ── Morale System ────────────────────────────────────────────
@@ -74,6 +91,10 @@ public class UnitController : MonoBehaviour
         if (isDefeated) return;
 
         currentMorale = Mathf.Max(0, currentMorale - amount);
+
+        // Update morale bar visual
+        moraleBar?.UpdateMorale(currentMorale);
+
         UpdateMoraleState();
         OnMoraleChanged?.Invoke(this);
 
@@ -106,14 +127,142 @@ public class UnitController : MonoBehaviour
     {
         if (isRouting) return;
         isRouting = true;
-        OnUnitRouted?.Invoke(this);
 
-        // Free the current cell
+        Debug.Log($"{data.unitName} is ROUTING! " +
+                $"ArmyMoraleManager exists: " +
+                $"{ArmyMoraleManager.Instance != null}");
+
+        moraleBar?.UpdateMorale(0);
+
         if (currentCell != null)
         {
             currentCell.isOccupied    = false;
             currentCell.occupyingUnit = null;
+            currentCell               = null;
         }
+
+        // Notify army morale system
+        if (ArmyMoraleManager.Instance != null)
+            ArmyMoraleManager.Instance.OnUnitRouted(this);
+        else
+            Debug.LogError("ArmyMoraleManager.Instance is NULL " +
+                        "— routing not counted!");
+
+        OnUnitRouted?.Invoke(this);
+        StartCoroutine(RoutingSequence());
+    }
+
+ System.Collections.IEnumerator RoutingSequence()
+{
+    SoldierSpawner spawner = GetComponent<SoldierSpawner>();
+
+    // Collect living soldiers with their CURRENT world positions
+    // captured RIGHT NOW before anything moves
+    List<(SoldierCircle sc, Vector3 worldPos)> livingSoldiers =
+        new List<(SoldierCircle, Vector3)>();
+
+    foreach (SoldierCircle sc in soldiers)
+    {
+        if (sc == null) continue;
+        if (sc.state == SoldierState.Dead) continue;
+
+        // Capture world position immediately
+        livingSoldiers.Add((sc, sc.transform.position));
+    }
+
+    // Blink loop — only changes COLOR, never touches transform
+    float blinkDuration = 1.2f;
+    float blinkSpeed    = 0.12f;
+    float elapsed       = 0f;
+    bool  isWhite       = false;
+
+    while (elapsed < blinkDuration)
+    {
+        isWhite = !isWhite;
+
+        foreach (var (sc, _) in livingSoldiers)
+        {
+            if (sc == null) continue;
+            SpriteRenderer sr = sc.GetComponent<SpriteRenderer>();
+            if (sr == null) continue;
+
+            sr.color = isWhite
+                ? Color.white
+                : (faction == Faction.Player
+                    ? sc.playerAlive
+                    : sc.enemyAlive);
+        }
+
+        yield return new WaitForSeconds(blinkSpeed);
+        elapsed += blinkSpeed;
+    }
+
+    // Reset colors
+    foreach (var (sc, _) in livingSoldiers)
+    {
+        if (sc != null) sc.SetState(SoldierState.Alive);
+    }
+
+    // NOW flee — soldiers detach from here with correct positions
+    Vector3 enemyDirection = GetEnemyDirection();
+    if (spawner != null)
+        FleeOffMap(transform.position, enemyDirection);
+
+    yield return new WaitForSeconds(3.0f);
+
+    isDefeated = true;
+    OnUnitDefeated?.Invoke(this);
+
+    if (moraleBar != null)
+        moraleBar.gameObject.SetActive(false);
+
+    Destroy(gameObject);
+}
+
+    Vector3 GetEnemyDirection()
+    {
+        // Player units flee downward (away from enemy at top)
+        // Enemy units flee upward (away from player at bottom)
+        if (faction == Faction.Player)
+            return new Vector3(0, -1, 0); // flee south
+
+        return new Vector3(0, 1, 0); // flee north
+    }
+
+    public void FleeOffMap(Vector3 unitWorldPos, Vector3 enemyDirection)
+    {
+        // Flee direction = away from enemy
+        Vector3 fleeDir = -enemyDirection.normalized;
+
+        // Stagger each soldier's flee start
+        // so they don't all bolt at exactly the same time
+        for (int i = 0; i < soldiers.Count; i++)
+        {
+            SoldierCircle sc = soldiers[i];
+            if (sc == null) continue;
+            if (sc.state == SoldierState.Dead) continue;
+
+            // Random delay before each soldier starts fleeing
+            float delay = UnityEngine.Random.Range(0f, 0.4f);
+
+            // Random flee speed — panic isn't uniform
+            float speed = UnityEngine.Random.Range(0.1f, 0.3f);
+
+            StartCoroutine(DelayedFlee(sc, fleeDir, speed, delay));
+        }
+    }
+
+    System.Collections.IEnumerator DelayedFlee(
+        SoldierCircle soldier,
+        Vector3 direction,
+        float speed,
+        float delay)
+    {
+        if (delay > 0)
+            yield return new WaitForSeconds(delay);
+
+        if (soldier != null)
+            soldier.FleeOffMap(direction, speed);
     }
 
     // ── Order Assignment (Planning Phase) ────────────────────────
@@ -123,6 +272,8 @@ public class UnitController : MonoBehaviour
         currentOrder     = OrderType.Move;
         orderTargetCell  = targetCell;
         orderTargetUnit  = null;
+        persistOrder     = false;
+
     }
 
     public void AssignFireOrder(UnitController target)
@@ -130,6 +281,7 @@ public class UnitController : MonoBehaviour
         currentOrder     = OrderType.Fire;
         orderTargetUnit  = target;
         orderTargetCell  = null;
+        persistOrder     = true;
     }
 
     public void AssignChargeOrder(UnitController target)
@@ -137,6 +289,7 @@ public class UnitController : MonoBehaviour
         currentOrder     = OrderType.Charge;
         orderTargetUnit  = target;
         orderTargetCell  = target.currentCell;
+        persistOrder     = true;
     }
 
     public void AssignHoldOrder()
@@ -144,6 +297,7 @@ public class UnitController : MonoBehaviour
         currentOrder     = OrderType.Hold;
         orderTargetCell  = null;
         orderTargetUnit  = null;
+        persistOrder     = false;
     }
 
 
@@ -153,6 +307,7 @@ public class UnitController : MonoBehaviour
         currentOrder     = OrderType.None;
         orderTargetCell  = null;
         orderTargetUnit  = null;
+        persistOrder     = false;
     }
 
     // ── Movement ─────────────────────────────────────────────────

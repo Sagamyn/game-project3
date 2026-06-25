@@ -128,29 +128,36 @@ public class HexGrid : MonoBehaviour
     }
 
     public List<HexCell> GetCellsInRange(HexCell origin, int range)
+{
+    // Guard against null origin
+    if (origin == null)
     {
-        List<HexCell> result = new List<HexCell>();
-
-        for (int dq = -range; dq <= range; dq++)
-        {
-            int rMin = Mathf.Max(-range, -dq - range);
-            int rMax = Mathf.Min( range, -dq + range);
-
-            for (int dr = rMin; dr <= rMax; dr++)
-            {
-                int ds = -dq - dr;
-                HexCell cell = GetCell(
-                    origin.q + dq,
-                    origin.r + dr,
-                    origin.s + ds
-                );
-                if (cell != null && cell != origin)
-                    result.Add(cell);
-            }
-        }
-
-        return result;
+        Debug.LogWarning("GetCellsInRange called with null origin!");
+        return new List<HexCell>();
     }
+
+    List<HexCell> result = new List<HexCell>();
+
+    for (int dq = -range; dq <= range; dq++)
+    {
+        int rMin = Mathf.Max(-range, -dq - range);
+        int rMax = Mathf.Min( range, -dq + range);
+
+        for (int dr = rMin; dr <= rMax; dr++)
+        {
+            int ds = -dq - dr;
+            HexCell cell = GetCell(
+                origin.q + dq,
+                origin.r + dr,
+                origin.s + ds
+            );
+            if (cell != null && cell != origin)
+                result.Add(cell);
+        }
+    }
+
+    return result;
+}
 
     public HexCell GetCellFromWorldPosition(Vector3 worldPos)
     {
