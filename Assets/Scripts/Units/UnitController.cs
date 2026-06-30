@@ -171,8 +171,8 @@ public class UnitController : MonoBehaviour
     }
 
     // Blink loop — only changes COLOR, never touches transform
-    float blinkDuration = 1.2f;
-    float blinkSpeed    = 0.12f;
+    float blinkDuration = 5f;
+    float blinkSpeed    = 0.3f;
     float elapsed       = 0f;
     bool  isWhite       = false;
 

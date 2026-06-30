@@ -66,15 +66,27 @@ public void KillSoldiersPublic(
 
         Debug.Log($"=== EXECUTING TURN {turnNumber} ===");
 
-        // Resolve existing melees first
+        // Step 1 — Resolve existing melees
         MeleeManager.Instance?.ResolveMeleeEngagements(this);
 
-        // Then resolve new orders
-        ResolveMovement(battleManager.playerUnits);
-        ResolveFire(battleManager.playerUnits);
-        ResolveCharge(battleManager.playerUnits);
+        // Step 2 — AI assigns orders FIRST
+        // before any movement so orders are based on
+        // current positions at start of turn
+        threatAssessment?.ExecuteAITurn();
 
-        ResolveAITurn();
+        // Step 3 — ALL movement resolves (player + enemy)
+        // now AI has orders assigned so they will move
+        ResolveMovement(battleManager.playerUnits);
+        ResolveMovement(battleManager.enemyUnits);
+
+        // Step 4 — ALL fire resolves
+        ResolveFire(battleManager.playerUnits);
+        ResolveFire(battleManager.enemyUnits);
+
+        // Step 5 — ALL charges resolve last
+        // positions are final after movement
+        ResolveAllChargesSimultaneously();
+
 
         ClearAllOrders();
         turnNumber++;
@@ -109,6 +121,199 @@ public void KillSoldiersPublic(
                 Debug.Log($"{unit.data.unitName} arrived!");
             });
         }
+    }
+
+    void ResolveAllChargesSimultaneously()
+    {
+        List<ChargeOrder> allCharges = new List<ChargeOrder>();
+
+        // Collect player charges
+        foreach (UnitController unit in battleManager.playerUnits)
+        {
+            if (unit.isDefeated || unit.isRouting) continue;
+            if (unit.currentOrder != OrderType.Charge) continue;
+            if (unit.orderTargetUnit == null) continue;
+
+            UnitController target = unit.orderTargetUnit;
+
+            // Target validation — check unit not cell
+            if (target.isDefeated || target.isRouting) continue;
+
+            // Recalculate distance from CURRENT positions
+            // not from where they were at order assignment
+            if (unit.currentCell == null) continue;
+
+            // Use world distance if cells don't match
+            // (unit may have moved this turn)
+            float worldDist = Vector3.Distance(
+                unit.transform.position,
+                target.transform.position
+            );
+
+            // Convert movement range to approximate world distance
+            // cellSize * movementRange = max world distance
+            float maxWorldDist = unit.data.movementRange * 1.2f;
+
+            if (worldDist > maxWorldDist)
+            {
+                Debug.Log($"{unit.data.unitName} charge cancelled " +
+                        $"— target moved too far " +
+                        $"(dist={worldDist:F1} max={maxWorldDist:F1})");
+                unit.ClearOrder();
+                continue;
+            }
+
+            allCharges.Add(new ChargeOrder(unit, target));
+        }
+
+        // Collect enemy charges
+        foreach (UnitController unit in battleManager.enemyUnits)
+        {
+            if (unit.isDefeated || unit.isRouting) continue;
+            if (unit.currentOrder != OrderType.Charge) continue;
+            if (unit.orderTargetUnit == null) continue;
+
+            UnitController target = unit.orderTargetUnit;
+            if (target.isDefeated || target.isRouting) continue;
+            if (unit.currentCell == null) continue;
+
+            float worldDist = Vector3.Distance(
+                unit.transform.position,
+                target.transform.position
+            );
+
+            float maxWorldDist = unit.data.movementRange * 1.2f;
+
+            if (worldDist > maxWorldDist)
+            {
+                Debug.Log($"{unit.data.unitName} charge cancelled " +
+                        $"— target moved too far");
+                unit.ClearOrder();
+                continue;
+            }
+
+            allCharges.Add(new ChargeOrder(unit, target));
+        }
+
+        Debug.Log($"Resolving {allCharges.Count} charges");
+
+        List<ChargeOrder> processed = new List<ChargeOrder>();
+
+        foreach (ChargeOrder charge in allCharges)
+        {
+            if (processed.Contains(charge)) continue;
+
+            // Check for head-on counter charge
+            ChargeOrder counter = allCharges.Find(c =>
+                c.attacker == charge.target &&
+                c.target   == charge.attacker
+            );
+
+            if (counter != null)
+            {
+                processed.Add(charge);
+                processed.Add(counter);
+                StartCoroutine(ResolveHeadOnCollision(
+                    charge.attacker,
+                    counter.attacker
+                ));
+            }
+            else
+            {
+                processed.Add(charge);
+
+                // Use CURRENT world positions for direction
+                Vector3 attackerPos = charge.attacker.transform.position;
+                Vector3 defenderPos = charge.target.transform.position;
+                Vector3 impactDir   = (defenderPos - attackerPos).normalized;
+
+                StartCoroutine(DelayedChargeImpact(
+                    charge.attacker,
+                    charge.target,
+                    impactDir
+                ));
+            }
+        }
+    }
+
+    public class ChargeOrder
+    {
+        public UnitController attacker;
+        public UnitController target;
+
+        public ChargeOrder(UnitController a, UnitController t)
+        {
+            attacker = a;
+            target   = t;
+        }
+    }
+
+    System.Collections.IEnumerator ResolveHeadOnCollision(
+    UnitController unitA,
+    UnitController unitB)
+    {
+        Debug.Log($"HEAD ON COLLISION: {unitA.data.unitName} " +
+                $"vs {unitB.data.unitName}!");
+
+        Vector3 dirAtoB = (unitB.transform.position -
+                        unitA.transform.position).normalized;
+        Vector3 dirBtoA = -dirAtoB;
+
+        SoldierSpawner spawnerA = unitA.GetComponent<SoldierSpawner>();
+        SoldierSpawner spawnerB = unitB.GetComponent<SoldierSpawner>();
+
+        // Both units gallop toward each other simultaneously
+        bool aArrived = false;
+        bool bArrived = false;
+
+        spawnerA?.MarchIntoEnemy(unitB, () => aArrived = true);
+        spawnerB?.MarchIntoEnemy(unitA, () => bArrived = true);
+
+        // Wait for both to arrive
+        float timeout = 0f;
+        while ((!aArrived || !bArrived) && timeout < 3f)
+        {
+            timeout += Time.deltaTime;
+            yield return null;
+        }
+
+        if (unitA == null || unitB == null) yield break;
+        if (unitA.isDefeated || unitB.isDefeated) yield break;
+
+        // HEAD ON IMPACT — both take damage
+        int damageAtoB = CalculateChargeDamage(unitA, unitB);
+        int damageBtoA = CalculateChargeDamage(unitB, unitA);
+
+        Debug.Log($"HEAD ON: {unitA.data.unitName} deals {damageAtoB} " +
+                $"| {unitB.data.unitName} deals {damageBtoA}");
+
+        unitB.TakeMoraleDamage(damageAtoB, unitA);
+        unitA.TakeMoraleDamage(damageBtoA, unitB);
+
+        // Kill soldiers on both sides
+        KillSoldiers(unitB, Mathf.RoundToInt(damageAtoB / 8f), unitA);
+        KillSoldiers(unitA, Mathf.RoundToInt(damageBtoA / 8f), unitB);
+
+        // Both sides get knocked back from each other
+        spawnerA?.ApplyChargeImpact(dirBtoA);
+        spawnerB?.ApplyChargeImpact(dirAtoB);
+
+        // Both units move to adjacent cells
+        HexCell destA = GetCellAdjacentTo(unitA, unitB);
+        HexCell destB = GetCellAdjacentTo(unitB, unitA);
+
+        if (destA != null) unitA.MoveToCell(destA);
+        if (destB != null) unitB.MoveToCell(destB);
+
+        // Settle then start melee
+        yield return new WaitForSeconds(0.6f);
+
+        if (unitA == null || unitB == null) yield break;
+        if (unitA.isRouting || unitB.isRouting) yield break;
+        if (unitA.isDefeated || unitB.isDefeated) yield break;
+
+        Debug.Log("HEAD ON: Melee begins!");
+        MeleeManager.Instance?.StartMelee(unitA, unitB);
     }
 
 // ── Fire Resolution ───────────────────────────────────────────────
@@ -171,6 +376,8 @@ public void KillSoldiersPublic(
 
             if (target.isDefeated || target.isRouting)
             {
+                Debug.Log($"{unit.data.unitName} charge cancelled " +
+                        $"— target routing");
                 unit.ClearOrder();
                 continue;
             }
@@ -181,22 +388,37 @@ public void KillSoldiersPublic(
                 continue;
             }
 
-            int distToTarget = unit.currentCell.DistanceTo(target.currentCell);
+            int distToTarget = unit.currentCell.DistanceTo(
+                target.currentCell
+            );
+
             if (distToTarget > unit.data.movementRange)
             {
-                Debug.Log($"{unit.data.unitName} charge cancelled — too far");
+                Debug.Log($"{unit.data.unitName} charge cancelled " +
+                        $"— target too far after movement");
                 unit.ClearOrder();
                 continue;
             }
 
-            // Calculate impact direction
-            Vector3 impactDir = (
-                target.transform.position -
-                unit.transform.position
-            ).normalized;
+            // ── Recalculate direction from CURRENT positions ───────
+            // Both units may have moved this turn
+            Vector3 attackerPos = unit.transform.position;
+            Vector3 defenderPos = target.transform.position;
 
-            // Start the full charge sequence
-            // MarchIntoEnemy handles the rush animation now
+            // Use actual soldier positions if available
+            // for more accurate direction
+            if (unit.soldiers.Count > 0 && unit.soldiers[0] != null)
+                attackerPos = unit.soldiers[0].transform.position;
+
+            if (target.soldiers.Count > 0 && target.soldiers[0] != null)
+                defenderPos = target.soldiers[0].transform.position;
+
+            Vector3 impactDir = (defenderPos - attackerPos).normalized;
+
+            Debug.Log($"{unit.data.unitName} charging " +
+                    $"{target.data.unitName} — " +
+                    $"recalculated direction: {impactDir}");
+
             StartCoroutine(DelayedChargeImpact(unit, target, impactDir));
         }
     }
@@ -206,27 +428,23 @@ public void KillSoldiersPublic(
     UnitController target,
     Vector3 impactDir)
     {
+        // Only check for defeated/routing — NOT melee
+        // units in melee CAN be charged
         if (attacker == null || target == null) yield break;
         if (target.isDefeated || target.isRouting) yield break;
+        if (attacker.isDefeated || attacker.isRouting) yield break;
 
         SoldierSpawner attackerSpawner =
             attacker.GetComponent<SoldierSpawner>();
         SoldierSpawner targetSpawner =
             target.GetComponent<SoldierSpawner>();
 
-        // ── PHASE 1: Cavalry Gallops Toward Enemy ─────────────────
-        Debug.Log("CHARGE: Cavalry galloping toward enemy...");
+        // Phase 1 — Gallop toward enemy
+        bool arrived = false;
+        attackerSpawner?.MarchIntoEnemy(target, () => arrived = true);
 
-        bool cavalryArrived = false;
-
-        attackerSpawner?.MarchIntoEnemy(target, () =>
-        {
-            cavalryArrived = true;
-        });
-
-        // Wait until cavalry soldiers reach enemy
         float timeout = 0f;
-        while (!cavalryArrived && timeout < 3f)
+        while (!arrived && timeout < 3f)
         {
             timeout += Time.deltaTime;
             yield return null;
@@ -235,45 +453,34 @@ public void KillSoldiersPublic(
         if (attacker == null || target == null) yield break;
         if (target.isDefeated || target.isRouting) yield break;
 
-        // ── PHASE 2: COLLISION ────────────────────────────────────
-        Debug.Log("CHARGE: COLLISION!");
-
-        // Apply charge damage
+        // Phase 2 — Impact
         int damage = CalculateChargeDamage(attacker, target);
-        Debug.Log($"{attacker.data.unitName} COLLIDES with " +
-                $"{target.data.unitName} — {damage} morale damage!");
-
         target.TakeMoraleDamage(damage, attacker);
+        KillSoldiers(target, Mathf.RoundToInt(damage / 8f), attacker);
 
-        int soldiersKilled = Mathf.RoundToInt(damage / 8f);
-        KillSoldiers(target, soldiersKilled, attacker);
-
-        // ── PHASE 3: Knockback ────────────────────────────────────
-        // Enemy soldiers fly outward from impact
+        // Phase 3 — Knockback
         targetSpawner?.ApplyChargeImpact(impactDir);
-
-        // Cavalry soldiers also bounce back slightly
-        // (collision affects both sides)
         attackerSpawner?.ApplyChargeImpact(-impactDir * 0.4f);
 
-        // Move cavalry unit root to adjacent cell
+        // Move cavalry adjacent
         if (target.currentCell != null)
         {
             HexCell dest = GetCellAdjacentTo(attacker, target);
-            if (dest != null)
-                attacker.MoveToCell(dest);
+            if (dest != null) attacker.MoveToCell(dest);
         }
 
-        // ── PHASE 4: Settle ───────────────────────────────────────
-        // Let knockback animation play out
+        // Phase 4 — Settle
         yield return new WaitForSeconds(0.6f);
 
         if (attacker == null || target == null) yield break;
         if (attacker.isRouting || target.isRouting) yield break;
         if (attacker.isDefeated || target.isDefeated) yield break;
 
-        // ── PHASE 5: Melee Begins ─────────────────────────────────
-        Debug.Log("CHARGE: Melee begins!");
+        // Phase 5 — Melee
+        // End any existing melee for these units first
+        MeleeManager.Instance?.EndEngagementsForUnit(attacker);
+        MeleeManager.Instance?.EndEngagementsForUnit(target);
+
         MeleeManager.Instance?.StartMelee(attacker, target);
     }
 
@@ -393,7 +600,7 @@ public void KillSoldiersPublic(
                 living.Add(sc);
         }
 
-        // Shuffle for random deaths
+        // Shuffle for random death distribution
         for (int i = living.Count - 1; i > 0; i--)
         {
             int j = UnityEngine.Random.Range(0, i + 1);
@@ -405,18 +612,13 @@ public void KillSoldiersPublic(
         {
             if (killed >= count) break;
 
-            // Capture world position
-            Vector3 worldPos = soldier.transform.position;
-
-            // Detach preserving world position
-            soldier.transform.SetParent(null, true);
-            soldier.transform.position = worldPos;
-
-            // Set dead state — this now stops all movement
+            // SetState now handles the entire death sequence
+            // including the pop animation and destruction
             soldier.SetState(SoldierState.Dead);
 
-            // Force stop any remaining velocity
-            soldier.StopAllMovement();
+            // Remove from unit's soldier list immediately
+            // since the object will destroy itself shortly
+            target.soldiers.Remove(soldier);
 
             killed++;
             target.aliveSoldierCount--;
@@ -443,25 +645,25 @@ public void KillSoldiersPublic(
 
 // ── AI Turn ───────────────────────────────────────────────────────
 
-void ResolveAITurn()
-{
-    if (threatAssessment != null)
-    {
-        // Use smart AI
-        threatAssessment.ExecuteAITurn();
+// //void ResolveAITurn()
+// {
+//     if (threatAssessment != null)
+//     {
+//         // Use smart AI
+//         threatAssessment.ExecuteAITurn();
 
-        // Resolve movement and fire for AI units
-        ResolveMovement(battleManager.enemyUnits);
-        ResolveFire(battleManager.enemyUnits);
-        ResolveCharge(battleManager.enemyUnits);
-    }
-    else
-    {
-        // Fallback to old simple AI if not wired up
-        Debug.LogWarning("ThreatAssessment not assigned — using simple AI");
-        SimpleAIFallback();
-    }
-}
+//         // Resolve movement and fire for AI units
+//         ResolveMovement(battleManager.enemyUnits);
+//         ResolveFire(battleManager.enemyUnits);
+//         ResolveCharge(battleManager.enemyUnits);
+//     }
+//     else
+//     {
+//         // Fallback to old simple AI if not wired up
+//         Debug.LogWarning("ThreatAssessment not assigned — using simple AI");
+//         SimpleAIFallback();
+//     }
+// }
 
 void SimpleAIFallback()
 {
@@ -557,8 +759,6 @@ void SimpleAIFallback()
         {
             if (unit == null || unit.isDefeated || unit.isRouting) continue;
 
-            // Don't clear orders for units in melee
-            // their "order" is the melee itself
             if (MeleeManager.Instance != null &&
                 MeleeManager.Instance.IsInMelee(unit))
                 continue;
@@ -573,6 +773,14 @@ void SimpleAIFallback()
                         unit.orderTargetUnit.isRouting)
                     {
                         unit.ClearOrder();
+                    }
+                    else
+                    {
+                        // Refresh target cell to current position
+                        // so next turn charge goes to new location
+                        if (unit.currentOrder == OrderType.Charge)
+                            unit.orderTargetCell =
+                                unit.orderTargetUnit.currentCell;
                     }
                 }
                 continue;

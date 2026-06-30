@@ -212,6 +212,20 @@ public class MeleeManager : MonoBehaviour
         return false;
     }
 
+    public void EndEngagementsForUnit(UnitController unit)
+    {
+        foreach (MeleeEngagement eng in activeEngagements)
+        {
+            if (!eng.isActive) continue;
+
+            if (eng.attacker == unit || eng.defender == unit)
+            {
+                Debug.Log($"Ending previous melee for {unit.data.unitName}");
+                EndMelee(eng);
+            }
+        }
+    }
+
     public List<MeleeEngagement> GetActiveEngagements()
         => activeEngagements;
 }
