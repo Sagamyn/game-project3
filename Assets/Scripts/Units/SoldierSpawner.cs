@@ -17,6 +17,9 @@ public class SoldierSpawner : MonoBehaviour
     private List<SoldierCircle> spawnedSoldiers = new List<SoldierCircle>();
     private int soldiersArrived = 0;
 
+    private List<Vector2> cachedScatterPositions;
+    private bool hasScatterCache = false;
+
     // ── Spawn ─────────────────────────────────────────────────────
 
     public void SpawnSoldiers()
@@ -178,6 +181,13 @@ public class SoldierSpawner : MonoBehaviour
         if (activeSoldiers == 0)
             onAllArrived?.Invoke();
     }
+
+    public void RegenerateScatterPattern()
+    {
+        hasScatterCache = false;
+    }
+
+    
 
     // Called on cavalry unit before impact
 // Soldiers march toward enemy formation
@@ -557,8 +567,14 @@ public class SoldierSpawner : MonoBehaviour
 
     List<Vector2> GetScatteredPositions(int count)
     {
+
+        if (hasScatterCache &&
+        cachedScatterPositions != null &&
+        cachedScatterPositions.Count == count)
+        {
+            return cachedScatterPositions;
+        }
         List<Vector2> pos = new List<Vector2>();
-        UnityEngine.Random.InitState(unit.GetInstanceID());
 
         for (int i = 0; i < count; i++)
             pos.Add(new Vector2(

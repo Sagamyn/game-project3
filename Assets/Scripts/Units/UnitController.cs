@@ -326,19 +326,22 @@ public class UnitController : MonoBehaviour
 
         Vector3 newWorldPos = targetCell.transform.position;
 
-        // Step 1: Capture BEFORE moving root
         SoldierSpawner spawner = GetComponent<SoldierSpawner>();
-        List<Vector3> startPositions = spawner?.CaptureSoldierWorldPositions();
 
-        // Step 2: Move root
+        // Generate fresh scatter pattern for skirmishers
+        // BEFORE marching so they march to NEW random spots
+        if (data.unitType == UnitType.Skirmisher)
+            spawner?.RegenerateScatterPattern();
+
+        List<Vector3> startPositions =
+            spawner?.CaptureSoldierWorldPositions();
+
         transform.position = newWorldPos;
 
-        // Step 3: March — note the explicit parameter names
-        spawner?.MarchToHex(
-            newHexWorldPos:       newWorldPos,
-            soldierStartPositions: startPositions,
-            onAllArrived:         () => { onComplete?.Invoke(); }
-        );
+        spawner?.MarchToHex(newWorldPos, startPositions, () =>
+        {
+            onComplete?.Invoke();
+        });
     }
 
     // Also fix AssignFormationChange — remove AnimateToFormation call
