@@ -11,6 +11,8 @@ public class SoldierCircle : MonoBehaviour
     public Color woundedColor = new Color(0.55f, 0.55f, 0.55f);
     public Color deadColor    = new Color(0.15f, 0.15f, 0.15f);
 
+    public GameObject bloodSplatterPrefab;
+
     [Header("Movement")]
     public float marchSpeed  = 2.0f;
     public float formUpSpeed = 3.5f;
@@ -256,9 +258,18 @@ public class SoldierCircle : MonoBehaviour
 
     public void SetState(SoldierState newState)
     {
+        SoldierState previousState = state;
         state = newState;
 
         if (sr == null) sr = GetComponent<SpriteRenderer>();
+
+        // Trigger death pop instead of just changing color
+        if (newState == SoldierState.Dead &&
+            previousState != SoldierState.Dead)
+        {
+            StartCoroutine(DeathPopSequence());
+            return; // don't change color — we're destroying anyway
+        }
 
         sr.color = state switch
         {
@@ -266,16 +277,71 @@ public class SoldierCircle : MonoBehaviour
                                         ? playerAlive
                                         : enemyAlive,
             SoldierState.Wounded => woundedColor,
-            SoldierState.Dead    => deadColor,
             _                    => sr.color
         };
 
-        // Stop all movement when soldier dies
         if (state == SoldierState.Dead)
         {
             movePhase         = MovePhase.Idle;
             knockbackVelocity = Vector3.zero;
         }
+    }
+
+    System.Collections.IEnumerator DeathPopSequence()
+    {
+        // Stop all movement immediately
+        movePhase         = MovePhase.Idle;
+        knockbackVelocity = Vector3.zero;
+
+        Vector3 startScale = transform.localScale;
+        Vector3 popScale   = startScale * 1.6f;
+        Vector3 deathPos   = transform.position;
+
+        float popDuration = 0.08f;
+        float elapsed     = 0f;
+
+        // Quick scale up — the "pop"
+        while (elapsed < popDuration)
+        {
+            elapsed += Time.deltaTime;
+            float t  = elapsed / popDuration;
+
+            transform.localScale = Vector3.Lerp(startScale, popScale, t);
+            yield return null;
+        }
+
+        // Spawn blood splatter at death position
+        SpawnBloodSplatter(deathPos);
+
+        // Destroy the soldier object entirely
+        // No more dead soldier circles cluttering the field
+        Destroy(gameObject);
+    }
+
+    void SpawnBloodSplatter(Vector3 position)
+    {
+        GameObject splatter;
+
+        if (bloodSplatterPrefab != null)
+        {
+            splatter = Instantiate(bloodSplatterPrefab, position, Quaternion.identity);
+        }
+        else
+        {
+            // Generate one on the fly if no prefab assigned
+            splatter = new GameObject("BloodSplatter");
+            splatter.transform.position = position;
+            splatter.AddComponent<BloodSplatter>();
+        }
+
+        // Random slight rotation for variety
+        splatter.transform.rotation = Quaternion.Euler(
+            0, 0, UnityEngine.Random.Range(0f, 360f)
+        );
+
+        // Random slight scale variety
+        float scaleVariance = UnityEngine.Random.Range(0.8f, 1.3f);
+        splatter.transform.localScale *= scaleVariance;
     }
 
     public bool IsMoving => movePhase != MovePhase.Idle;

@@ -17,6 +17,9 @@ public class SoldierSpawner : MonoBehaviour
     private List<SoldierCircle> spawnedSoldiers = new List<SoldierCircle>();
     private int soldiersArrived = 0;
 
+    private List<Vector2> cachedScatterPositions;
+    private bool hasScatterCache = false;
+
     // ── Spawn ─────────────────────────────────────────────────────
 
     public void SpawnSoldiers()
@@ -179,30 +182,39 @@ public class SoldierSpawner : MonoBehaviour
             onAllArrived?.Invoke();
     }
 
+    public void RegenerateScatterPattern()
+    {
+        hasScatterCache = false;
+    }
+
+    
+
     // Called on cavalry unit before impact
 // Soldiers march toward enemy formation
     public void MarchIntoEnemy(
-        UnitController enemyUnit,
-        System.Action onArrived)
+    UnitController enemyUnit,
+    System.Action onArrived)
     {
-        List<Vector2> enemyPositions = new List<Vector2>();
-
-        // Get enemy soldier world positions
+        // Get enemy soldier CURRENT world positions
+        // captured RIGHT NOW at march start
         List<Vector3> targets = new List<Vector3>();
+
         foreach (SoldierCircle sc in enemyUnit.soldiers)
         {
             if (sc == null) continue;
             if (sc.state == SoldierState.Dead) continue;
+
+            // Use actual world position right now
             targets.Add(sc.transform.position);
         }
 
+        // Fallback to unit root position if no soldiers
         if (targets.Count == 0)
         {
-            onArrived?.Invoke();
-            return;
+            targets.Add(enemyUnit.transform.position);
         }
 
-        int arrivedCount  = 0;
+        int arrivedCount   = 0;
         int activeSoldiers = 0;
 
         Transform container = unit.soldierContainer != null
@@ -217,28 +229,26 @@ public class SoldierSpawner : MonoBehaviour
 
             activeSoldiers++;
 
-            // Each cavalry soldier targets nearest enemy soldier
-            // or wraps around if more cavalry than enemy soldiers
-            int targetIndex = i % targets.Count;
+            int targetIndex   = i % targets.Count;
             Vector3 worldDest = targets[targetIndex];
 
-            // Add slight offset so they don't all stack on same point
+            // Slight random offset so soldiers
+            // don't all stack on exact same point
             worldDest += new Vector3(
-                UnityEngine.Random.Range(-0.1f, 0.1f),
-                UnityEngine.Random.Range(-0.1f, 0.1f),
+                UnityEngine.Random.Range(-0.15f, 0.15f),
+                UnityEngine.Random.Range(-0.15f, 0.15f),
                 0
             );
 
-            // Capture current world position
+            // Capture start position NOW
             Vector3 startPos = sc.transform.position;
 
-            // Fast charge speed — cavalry is galloping
-            float chargeSpeed = UnityEngine.Random.Range(1f, 2f);
+            float chargeSpeed = UnityEngine.Random.Range(5f, 8f);
 
             StartCoroutine(ChargeIntoEnemy(
                 sc,
-                startPos,
-                worldDest,
+                startPos,   // where they are NOW
+                worldDest,  // where enemy is NOW
                 container,
                 chargeSpeed,
                 () =>
@@ -557,8 +567,14 @@ public class SoldierSpawner : MonoBehaviour
 
     List<Vector2> GetScatteredPositions(int count)
     {
+
+        if (hasScatterCache &&
+        cachedScatterPositions != null &&
+        cachedScatterPositions.Count == count)
+        {
+            return cachedScatterPositions;
+        }
         List<Vector2> pos = new List<Vector2>();
-        UnityEngine.Random.InitState(unit.GetInstanceID());
 
         for (int i = 0; i < count; i++)
             pos.Add(new Vector2(
