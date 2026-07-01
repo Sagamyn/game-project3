@@ -23,6 +23,12 @@ public class GameManager : MonoBehaviour
     [Header("UI")]
     public FormationUI formationUI;
 
+    [Header("Order Arrows")]
+    public GameObject orderArrowPrefab;
+
+    private Dictionary<UnitController, OrderArrow> activeArrows
+    = new Dictionary<UnitController, OrderArrow>();
+
     void Awake()
     {
         // Singleton pattern — one GameManager exists at all times
@@ -51,6 +57,7 @@ public void KillSoldiersPublic(
         currentPhase = TurnPhase.Planning;
         selectedUnit = null;
         ClearHighlights();
+        RefreshAllOrderArrows();
         Debug.Log($"Turn {turnNumber} — Planning Phase");
     }
 
@@ -63,7 +70,7 @@ public void KillSoldiersPublic(
         currentPhase = TurnPhase.Execution;
         ClearHighlights();
         DeselectUnit();
-
+        ClearAllOrderArrows();
         Debug.Log($"=== EXECUTING TURN {turnNumber} ===");
 
         // Step 1 — Resolve existing melees
@@ -232,6 +239,77 @@ public void KillSoldiersPublic(
                     charge.target,
                     impactDir
                 ));
+            }
+        }
+    }
+
+    void ShowOrderArrow(UnitController unit)
+{
+    if (unit.currentOrder == OrderType.None ||
+        unit.currentOrder == OrderType.Hold)
+    {
+        HideOrderArrow(unit);
+        return;
+    }
+
+    Vector3 startPos = unit.transform.position;
+    Vector3 endPos;
+
+    if (unit.currentOrder == OrderType.Move &&
+        unit.orderTargetCell != null)
+    {
+        endPos = unit.orderTargetCell.transform.position;
+    }
+    else if ((unit.currentOrder == OrderType.Fire ||
+              unit.currentOrder == OrderType.Charge) &&
+             unit.orderTargetUnit != null)
+    {
+        endPos = unit.orderTargetUnit.transform.position;
+    }
+    else
+    {
+        return;
+    }
+
+    if (!activeArrows.ContainsKey(unit))
+    {
+        GameObject arrowObj = Instantiate(orderArrowPrefab);
+        OrderArrow arrow = arrowObj.GetComponent<OrderArrow>();
+        activeArrows[unit] = arrow;
+    }
+
+    activeArrows[unit].DrawArrow(startPos, endPos, unit.currentOrder);
+}
+
+    void HideOrderArrow(UnitController unit)
+    {
+        if (activeArrows.ContainsKey(unit))
+        {
+            activeArrows[unit].Hide();
+        }
+    }
+
+    void ClearAllOrderArrows()
+    {
+        foreach (var arrow in activeArrows.Values)
+        {
+            if (arrow != null)
+                Destroy(arrow.gameObject);
+        }
+        activeArrows.Clear();
+    }
+
+    void RefreshAllOrderArrows()
+    {
+        ClearAllOrderArrows();
+
+        foreach (UnitController unit in battleManager.playerUnits)
+        {
+            if (unit == null || unit.isDefeated || unit.isRouting) continue;
+            if (unit.currentOrder != OrderType.None &&
+                unit.currentOrder != OrderType.Hold)
+            {
+                ShowOrderArrow(unit);
             }
         }
     }
@@ -933,18 +1011,17 @@ void SimpleAIFallback()
 
     void AssignMoveOrder(HexCell targetCell)
     {
-        // Block movement if in square formation
         if (selectedUnit.currentFormation == FormationType.Square)
         {
             Debug.Log("Cannot move in Square formation!");
-
-            // Blink the Line Formation button to tell player
             formationUI?.BlinkLineButton();
             return;
         }
 
         selectedUnit.AssignMoveOrder(targetCell);
         targetCell.SetHighlight(HexCell.colorSelected);
+
+        ShowOrderArrow(selectedUnit); // ← ADD THIS LINE
 
         Debug.Log($"{selectedUnit.data.unitName} → Move to " +
                 $"({targetCell.q},{targetCell.r},{targetCell.s})");
@@ -963,7 +1040,10 @@ void SimpleAIFallback()
         selectedUnit.AssignFireOrder(target);
         target.currentCell.SetHighlight(HexCell.colorAttack);
 
-        Debug.Log($"{selectedUnit.data.unitName} → Fire at {target.data.unitName}");
+        ShowOrderArrow(selectedUnit); // ← ADD THIS LINE
+
+        Debug.Log($"{selectedUnit.data.unitName} → Fire at " +
+                $"{target.data.unitName}");
 
         DeselectUnit();
     }
@@ -999,6 +1079,8 @@ void SimpleAIFallback()
     {
         selectedUnit.AssignChargeOrder(target);
         target.currentCell.SetHighlight(HexCell.colorAttack);
+
+        ShowOrderArrow(selectedUnit); // ← ADD THIS LINE
 
         Debug.Log($"{selectedUnit.data.unitName} → CHARGE at " +
                 $"{target.data.unitName}!");
