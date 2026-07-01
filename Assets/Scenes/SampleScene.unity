@@ -1778,6 +1778,7 @@ MonoBehaviour:
   highlightedCells: []
   threatAssessment: {fileID: 1586501353}
   formationUI: {fileID: 149402531}
+  orderArrowPrefab: {fileID: 830339477744013813, guid: 5ebe3594d2d75994f96e89cd226e7094, type: 3}
 --- !u!4 &1083788279
 Transform:
   m_ObjectHideFlags: 0
